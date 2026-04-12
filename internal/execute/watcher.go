@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/microsoft/typescript-go/internal/execute/incremental"
 	"github.com/microsoft/typescript-go/internal/execute/tsc"
 	"github.com/microsoft/typescript-go/internal/tsoptions"
+	"github.com/sgtdi/fswatcher"
 )
 
 type Watcher struct {
@@ -25,6 +27,8 @@ type Watcher struct {
 	program        *incremental.Program
 	prevModified   map[string]time.Time
 	configModified bool
+
+	fswatcher *fswatcher.Watcher
 }
 
 var _ tsc.Watcher = (*Watcher)(nil)
@@ -57,11 +61,49 @@ func (w *Watcher) start() {
 	w.program = incremental.ReadBuildInfoProgram(w.config, incremental.NewBuildInfoReader(w.host), w.host)
 
 	if w.testing == nil {
-		watchInterval := w.config.ParsedConfig.WatchOptions.WatchInterval()
-		for {
-			w.DoCycle()
-			time.Sleep(watchInterval)
+		since := time.Now()
+		w.DoCycle()
+		sourceDir := w.config.CommonSourceDirectory()
+		fmt.Printf("wat %s\n", sourceDir)
+		fsw, _ := fswatcher.New(
+			fswatcher.WithPath(sourceDir),
+		)
+		w.fswatcher = &fsw
+		for dir := range w.config.WildcardDirectories() {
+			fmt.Printf("wild %s\n", dir)
 		}
+		ctx := context.Background()
+		go fsw.Watch(ctx)
+		for event := range fsw.Events() {
+			// very stupid debounce
+			if event.Time.Before(since) {
+				fmt.Printf("Obsolete %s", event.Path)
+				continue
+			}
+			if !w.config.PossiblyMatchesFileName(event.Path) {
+				fmt.Printf("Ignore %s", event.Path)
+				continue
+			}
+			var types, flags []string
+			// Loop through types and flags
+			for _, t := range event.Types {
+				types = append(types, t.String())
+			}
+			for _, f := range event.Flags {
+				flags = append(flags, f)
+			}
+			fmt.Printf("File changed: %s %v %v\n", event.Path, types, flags)
+
+			time.Sleep(100)
+			since = time.Now()
+			w.DoCycle()
+		}
+		//} else if w.testing == nil {
+		//	watchInterval := w.config.ParsedConfig.WatchOptions.WatchInterval()
+		//	for {
+		//		w.DoCycle()
+		//		time.Sleep(watchInterval)
+		//	}
 	} else {
 		// Initial compilation in test mode
 		w.DoCycle()
@@ -70,7 +112,7 @@ func (w *Watcher) start() {
 
 func (w *Watcher) DoCycle() {
 	// if this function is updated, make sure to update `RunWatchCycle` in export_test.go as needed
-
+	fmt.Fprintln(w.sys.Writer(), "boop", w.sys.Now())
 	if w.hasErrorsInTsConfig() {
 		// these are unrecoverable errors--report them and do not build
 		return
